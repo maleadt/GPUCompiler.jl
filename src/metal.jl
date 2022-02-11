@@ -325,8 +325,8 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         Builder(ctx) do builder
             for use in uses(f)
                 val = user(use)
-                callee_f = LLVM.parent(LLVM.parent(val))
                 if val isa LLVM.CallInst || val isa LLVM.InvokeInst || val isa LLVM.CallBrInst
+                    callee_f = LLVM.parent(LLVM.parent(val))
                     # forward the arguments
                     position!(builder, val)
                     new_val = if val isa LLVM.CallInst
