@@ -389,7 +389,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
     # Add metadata for a simple buffer holding a MtlBuffer
     function process_buf_simple(arg_infos, ty, i)
-        arg_names = ["A", "B", "C"]
+        arg_name = "arg_$i"
         arg_info = Metadata[]
         @info "In process simple buffer: " i ty
         # Ex:
@@ -408,7 +408,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         push!(arg_info, MDString("air.arg_type_name"; ctx))
         push!(arg_info, MDString("float"; ctx)) # TODO: Get properly
         push!(arg_info, MDString("air.arg_name"; ctx))
-        push!(arg_info, MDString(arg_names[i]; ctx))
+        push!(arg_info, MDString(arg_name; ctx))
 
         arg_info = MDNode(arg_info; ctx)
         push!(arg_infos, arg_info)
@@ -417,7 +417,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     # Create metadata for argument buffer holding MtlDeviceArray
     # TODO: Check for duplicated argument buffer struct_type_info? Is this worth it?
     function process_buf_arg(arg_infos, ty, i)
-        arg_names = ["A", "B", "C"]
+        arg_name = "arg_$i"
         arg_info = Metadata[]
         @info "In process arg buffer: " i ty
         #=
@@ -506,7 +506,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         push!(arg_info, MDString("air.arg_type_name"; ctx))
         push!(arg_info, MDString("MtlDeviceArray"; ctx)) # TODO: Figure out what to put here. Does it matter?
         push!(arg_info, MDString("air.arg_name"; ctx))
-        push!(arg_info, MDString(arg_names[i]; ctx)) # TODO: How to get this? Does the compiler job have it somewhere?
+        push!(arg_info, MDString(arg_name; ctx)) # TODO: How to get this? Does the compiler job have it somewhere?
         # Ignore unused flag for now
     
         arg_info = MDNode(arg_info; ctx)
