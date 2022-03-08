@@ -117,16 +117,33 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     isempty(used_intrinsics) && return false
     nargs = length(used_intrinsics)
 
-    # add the arguments to every function
-    worklist = filter(!isdeclaration, collect(functions(mod)))
-    worklist = filter(worklist) do f
-        # HACK: don't add input arguments to specific runtime functions that
-        #       we might later introduce new references to (without then
-        #       knowing about the input arguments). this only happens with
-        #       gpu_gc_pool_alloc, which is currently special-cased for
-        #       kernel state lowering (which has the same issue).
-        LLVM.name(f) != "gpu_gc_pool_alloc"
+    # determine which functions need these arguments
+    worklist = Set{LLVM.Function}([entry])
+    for intr_fn in used_intrinsics
+        push!(worklist, functions(mod)[intr_fn])
     end
+    worklist_length = 0
+    while worklist_length != length(worklist)
+        # iteratively discover functions that use an intrinsic or any function calling it
+        worklist_length = length(worklist)
+        additions = LLVM.Function[]
+        for f in worklist, use in uses(f)
+            inst = user(use)::Instruction
+            bb = LLVM.parent(inst)
+            new_f = LLVM.parent(bb)
+            in(new_f, worklist) || push!(additions, new_f)
+        end
+        for f in additions
+            push!(worklist, f)
+        end
+    end
+    for intr_fn in used_intrinsics
+        delete!(worklist, functions(mod)[intr_fn])
+    end
+
+    # add the arguments
+    # NOTE: we could be more fine-grained, only adding the specific intrinsics used by this function.
+    #       not sure if that's worth it though.
     workmap = Dict{LLVM.Function, LLVM.Function}()
     for f in worklist
         fn = LLVM.name(f)
