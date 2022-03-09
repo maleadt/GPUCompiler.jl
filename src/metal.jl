@@ -47,12 +47,14 @@ function process_module!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module
     end
 end
 
+const LLVMMETALKERNELCallConv = LLVM.API.LLVMCallConv(103)
+
 function process_entry!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
     entry = invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
     if job.source.kernel
         # calling convention
-        callconv!(entry, LLVM.API.LLVMMETALKERNELCallConv #=LLVM.API.LLVMCallConv(103)=#)
+        callconv!(entry, LLVMMETALKERNELCallConv)
         # TODO: Fix argument types here??
     end
 
