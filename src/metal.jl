@@ -69,7 +69,9 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
     entry_fn = LLVM.name(entry)
 
     if job.source.kernel
-        add_input_arguments!(job, mod, entry)
+        arguments = add_input_arguments!(job, mod, entry)
+        entry = LLVM.functions(mod)[entry_fn]
+        add_metadata!(job, mod, entry, arguments)
 
         # TESTING: Adding llvm.module.flags
         # wchar_size = 4
@@ -218,7 +220,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     used_intrinsics = filter(keys(kernel_intrinsics)) do intr_fn
         haskey(functions(mod), intr_fn)
     end |> collect
-    isempty(used_intrinsics) && return false
+    isempty(used_intrinsics) && return used_intrinsics
     nargs = length(used_intrinsics)
 
     # determine which functions need these arguments
@@ -388,7 +390,12 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         unsafe_delete!(mod, intr)
     end
 
-    ### add metadata
+    return used_intrinsics
+end
+
+function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                       entry::LLVM.Function, used_intrinsics::Vector)
+    ctx = context(mod)
 
     # Add metadata for a simple buffer holding a MtlBuffer
     function process_buf_simple(arg_infos, ty, i)
@@ -515,8 +522,6 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         return nothing
     end
 
-
-    entry = functions(mod)[entry_fn]
     ## argument info
     arg_infos = Metadata[]
     # Regular arguments first
@@ -554,5 +559,5 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     kernel_md = MDNode([entry, stage_infos, arg_infos]; ctx)
     push!(metadata(mod)["air.kernel"], kernel_md)
 
-    return true
+    return
 end
