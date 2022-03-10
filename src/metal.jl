@@ -561,3 +561,8 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
     return
 end
+
+function code_native(io::IO, job::CompilerJob{MetalCompilerTarget}; raw::Bool=true, dump_module::Bool=true)
+    obj, _ = codegen(:obj, job; strip=!raw, only_entry=!dump_module, validate=false)
+    print(io, obj)
+end
