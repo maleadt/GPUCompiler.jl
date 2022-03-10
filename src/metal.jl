@@ -394,7 +394,6 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     function process_buf_simple(arg_infos, ty, i)
         arg_name = "arg_$i"
         arg_info = Metadata[]
-        @info "In process simple buffer: " i ty
         # Ex:
         # !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"float", !"air.arg_name", !"inA"}
 
@@ -422,7 +421,6 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     function process_buf_arg(arg_infos, ty, i)
         arg_name = "arg_$i"
         arg_info = Metadata[]
-        @info "In process arg buffer: " i ty
         #=
         struct MtlDeviceArray{T,N,A} <: AbstractArray{T,N}
             shape::Dims{N} => N x Int64
@@ -520,11 +518,9 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
     entry = functions(mod)[entry_fn]
     ## argument info
-    @info "-------- In add input arguments " job.source.tt
     arg_infos = Metadata[]
     # Regular arguments first
     for (i, arg_type) in enumerate(job.source.tt.parameters)
-        @info "Arg $i of type $arg_type ---"
         if arg_type.name.name == :MtlDeviceArray
             # Process argument buffer holding MtlDeviceArray
             process_buf_arg(arg_infos, arg_type, i)
