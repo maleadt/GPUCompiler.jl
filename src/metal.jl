@@ -1,5 +1,7 @@
 # implementation of the GPUCompiler interfaces for generating Metal code
 
+const Metal_LLVM_Tools_jll = LazyModule("Metal_LLVM_Tools_jll", UUID("0418c028-ff8c-56b8-a53e-0f9676ed36fc"))
+
 ## target
 
 export MetalCompilerTarget
@@ -14,14 +16,10 @@ end
 
 source_code(target::MetalCompilerTarget) = "metal"
 
+# Metal is not supported by our LLVM builds, so we can't get a target machine
+llvm_machine(::MetalCompilerTarget) = nothing
+
 llvm_triple(target::MetalCompilerTarget) = "air64-apple-macosx$(target.macos)"
-
-function llvm_machine(target::MetalCompilerTarget)
-    triple = llvm_triple(target)
-    t = Target(triple=triple)
-
-    TargetMachine(t, triple)
-end
 
 llvm_datalayout(target::MetalCompilerTarget) =
     "e-p:64:64:64"*
@@ -38,16 +36,17 @@ needs_byval(job::CompilerJob{MetalCompilerTarget}) = false
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
 runtime_slug(job::CompilerJob{MetalCompilerTarget}) = "metal-macos$(job.target.macos)"
 
+const LLVMMETALFUNCCallConv = LLVM.API.LLVMCallConv(102)
+const LLVMMETALKERNELCallConv = LLVM.API.LLVMCallConv(103)
+
 function process_module!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
     # calling convention
     for f in functions(mod)
-        #callconv!(f, #=LLVM.API.LLVMMETALFUNCCallConv=# LLVM.API.LLVMCallConv(102))
+        #callconv!(f, LLVMMETALFUNCCallConv)
         # XXX: this makes InstCombine erase kernel->func calls.
         #      do we even need this? why?
     end
 end
-
-const LLVMMETALKERNELCallConv = LLVM.API.LLVMCallConv(103)
 
 function process_entry!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
     entry = invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
@@ -83,7 +82,7 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
         wchar_md = MDNode(wchar_md; ctx)
         push!(metadata(mod)["llvm.module.flags"], wchar_md)
 
-        # LLVM.API.LLVMAddModuleFlag(mod, LLVM.API.LLVMModuleFlagBehavior(1), 
+        # LLVM.API.LLVMAddModuleFlag(mod, LLVM.API.LLVMModuleFlagBehavior(1),
         #         Cstring(pointer(wchar_key)), Csize_t(length(wchar_key)),
         #         wchar_md)
 
@@ -96,7 +95,7 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
         max_buff = MDNode(max_buff; ctx)
         push!(metadata(mod)["llvm.module.flags"], max_buff)
 
-        # LLVM.API.LLVMAddModuleFlag(mod, LLVM.API.LLVMModuleFlagBehavior(7), 
+        # LLVM.API.LLVMAddModuleFlag(mod, LLVM.API.LLVMModuleFlagBehavior(7),
         #         Cstring(pointer(max_buff_key)), Csize_t(length(max_buff_key)),
         #         max_buff)
 
@@ -304,7 +303,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         end
 
         # we don't want module-level changes, because otherwise LLVM will clone metadata,
-        # resulting in mismatching references between `!dbg` metadata and `dbg` instructions        
+        # resulting in mismatching references between `!dbg` metadata and `dbg` instructions
         clone_into!(new_f, f; value_map, materializer,
                     changes=LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly)
 
@@ -516,7 +515,7 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         push!(arg_info, MDString("air.arg_name"; ctx))
         push!(arg_info, MDString(arg_name; ctx)) # TODO: How to get this? Does the compiler job have it somewhere?
         # Ignore unused flag for now
-    
+
         arg_info = MDNode(arg_info; ctx)
         push!(arg_infos, arg_info)
         return nothing
@@ -535,7 +534,7 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         # else
         #     error("Invalid argument type of $arg_type at argument index $i. Should be MtlDeviceArray or MtlBuffer")
         end
-        
+
     end
     # Intrinsics last
     for (i, intr_fn) in enumerate(used_intrinsics)
@@ -560,4 +559,33 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     push!(metadata(mod)["air.kernel"], kernel_md)
 
     return
+end
+
+@unlocked function mcgen(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
+                         format=LLVM.API.LLVMObjectFile)
+    # translate to SPIR-V
+    input = tempname(cleanup=false) * ".bc"
+    translated = tempname(cleanup=false) * ".metallib"
+    write(input, mod)
+    Metal_LLVM_Tools_jll.metallib_as() do assembler
+        proc = run(ignorestatus(`$assembler -o $translated $input`))
+        if !success(proc)
+            error("""Failed to translate LLVM code to MetalLib.
+                     If you think this is a bug, please file an issue and attach $(input).""")
+        end
+    end
+
+    output = if format == LLVM.API.LLVMObjectFile
+        read(translated)
+    else
+        # disassemble
+        Metal_LLVM_Tools_jll.metallib_dis() do disassembler
+            read(`$disassembler -o - $translated`, String)
+        end
+    end
+
+    rm(input)
+    rm(translated)
+
+    return output
 end
