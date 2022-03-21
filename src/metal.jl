@@ -39,6 +39,8 @@ runtime_slug(job::CompilerJob{MetalCompilerTarget}) = "metal-macos$(job.target.m
 const LLVMMETALFUNCCallConv = LLVM.API.LLVMCallConv(102)
 const LLVMMETALKERNELCallConv = LLVM.API.LLVMCallConv(103)
 
+const metal_struct_names = [:MtlDeviceArray, :MtlDeviceMatrix, :MtlDeviceVector]
+
 function process_module!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
     # calling convention
     for f in functions(mod)
@@ -258,8 +260,6 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
         # create a new function
         new_param_types = LLVMType[]
-
-        metal_struct_names = [:MtlDeviceArray, :MtlDeviceMatrix, :MtlDeviceVector]
         for (i, param) in enumerate(job.source.tt.parameters)
             # Create Metal device array struct type and
             # alter MtlDeviceArrays to have correct addresspace
@@ -474,31 +474,11 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         push!(struct_type_info, MDString("shape"; ctx)) # First field name
         push!(struct_type_info, MDString("air.indirect_argument"; ctx))
 
-        shape_field_info = Metadata[]
-        push!(shape_field_info, Metadata(ConstantInt(Int32(0); ctx))) # Field index
-        push!(shape_field_info, MDString("air.indirect_constant"; ctx))
-        push!(shape_field_info, MDString("air.location_index"; ctx))
-        push!(shape_field_info, Metadata(ConstantInt(Int32(0); ctx))) # Field index again?
-        push!(shape_field_info, Metadata(ConstantInt(Int32(1); ctx))) # Address space TODO: Check and get properly
-        push!(shape_field_info, MDString("air.arg_type_name"; ctx))
-        push!(shape_field_info, MDString("ulong"; ctx)) # TODO: Check long?
-        push!(shape_field_info, MDString("air.arg_name"; ctx))
-        push!(shape_field_info, MDString("shape"; ctx))
-        shape_field_info = MDNode(shape_field_info; ctx)
-
-        push!(struct_type_info, shape_field_info) # First field info
-        push!(struct_type_info, Metadata(ConstantInt(Int32(8); ctx))) # TODO: What is this?
-        push!(struct_type_info, Metadata(ConstantInt(Int32(8); ctx))) # TODO: What is this?
-        push!(struct_type_info, Metadata(ConstantInt(Int32(0); ctx))) # TODO: What is this?
-        push!(struct_type_info, MDString("float"; ctx)) # Second field data type TODO: Properly get this
-        push!(struct_type_info, MDString("ptr"; ctx)) # Second field name
-        push!(struct_type_info, MDString("air.indirect_argument"; ctx))
-
         ptr_field_info = Metadata[]
-        push!(ptr_field_info, Metadata(ConstantInt(Int32(1); ctx))) # Field index
+        push!(ptr_field_info, Metadata(ConstantInt(Int32(0); ctx))) # Field index
         push!(ptr_field_info, MDString("air.buffer"; ctx))
         push!(ptr_field_info, MDString("air.location_index"; ctx))
-        push!(ptr_field_info, Metadata(ConstantInt(Int32(1); ctx))) # Field index again?
+        push!(ptr_field_info, Metadata(ConstantInt(Int32(0); ctx))) # Field index again?
         push!(ptr_field_info, Metadata(ConstantInt(Int32(1); ctx))) # Address space TODO: Check and get properly
         push!(ptr_field_info, MDString("air.read_write"; ctx)) # TODO: Check for const array
         push!(ptr_field_info, MDString("air.arg_type_size"; ctx))
@@ -511,7 +491,27 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         push!(ptr_field_info, MDString("ptr"; ctx))
         ptr_field_info = MDNode(ptr_field_info; ctx)
 
-        push!(struct_type_info, ptr_field_info) # Second field info
+        shape_field_info = Metadata[]
+        push!(shape_field_info, Metadata(ConstantInt(Int32(1); ctx))) # Field index
+        push!(shape_field_info, MDString("air.indirect_constant"; ctx))
+        push!(shape_field_info, MDString("air.location_index"; ctx))
+        push!(shape_field_info, Metadata(ConstantInt(Int32(1); ctx))) # Field index again?
+        push!(shape_field_info, Metadata(ConstantInt(Int32(1); ctx))) # Address space TODO: Check and get properly
+        push!(shape_field_info, MDString("air.arg_type_name"; ctx))
+        push!(shape_field_info, MDString("ulong"; ctx)) # TODO: Check long?
+        push!(shape_field_info, MDString("air.arg_name"; ctx))
+        push!(shape_field_info, MDString("shape"; ctx))
+        shape_field_info = MDNode(shape_field_info; ctx)
+
+        push!(struct_type_info, ptr_field_info) # First field info
+        push!(struct_type_info, Metadata(ConstantInt(Int32(8); ctx))) # TODO: What is this?
+        push!(struct_type_info, Metadata(ConstantInt(Int32(8); ctx))) # TODO: What is this?
+        push!(struct_type_info, Metadata(ConstantInt(Int32(0); ctx))) # TODO: What is this?
+        push!(struct_type_info, MDString("float"; ctx)) # Second field data type TODO: Properly get this
+        push!(struct_type_info, MDString("ptr"; ctx)) # Second field name
+        push!(struct_type_info, MDString("air.indirect_argument"; ctx))
+
+        push!(struct_type_info, shape_field_info) # Second field info
         struct_type_info = MDNode(struct_type_info; ctx)
 
         # Create the argument buffer main metadata
@@ -546,14 +546,14 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     arg_infos = Metadata[]
     # Regular arguments first
     for (i, arg_type) in enumerate(job.source.tt.parameters)
-        if arg_type.name.name == :MtlDeviceArray
+        if arg_type.name.name in metal_struct_names
             # Process argument buffer holding MtlDeviceArray
             process_buf_arg(arg_infos, arg_type, i)
-        else#if arg_type.name.name in (:LLVMPtr, :MtlBuffer)
+        elseif arg_type.name.name in (:LLVMPtr, :MtlBuffer)
             # Process simple buffer holding MtlBuffer
             process_buf_simple(arg_infos, arg_type, i)
-        # else
-        #     error("Invalid argument type of $arg_type at argument index $i. Should be MtlDeviceArray or MtlBuffer")
+        else
+            # error("Invalid argument type of $arg_type at argument index $i. Should be MtlDeviceArray/Vector/Matrix or MtlBuffer")
         end
 
     end
