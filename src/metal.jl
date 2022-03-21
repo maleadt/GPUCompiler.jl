@@ -54,7 +54,6 @@ function process_entry!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
     if job.source.kernel
         # calling convention
         callconv!(entry, LLVMMETALKERNELCallConv)
-        # TODO: Fix argument types here??
     end
 
     return entry
@@ -68,6 +67,7 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
     entry_fn = LLVM.name(entry)
 
     if job.source.kernel
+        # Change intrinsics to be input arguments as necessary and add metadata
         arguments = add_input_arguments!(job, mod, entry)
         entry = LLVM.functions(mod)[entry_fn]
         add_metadata!(job, mod, entry, arguments)
@@ -219,6 +219,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     used_intrinsics = filter(keys(kernel_intrinsics)) do intr_fn
         haskey(functions(mod), intr_fn)
     end |> collect
+    # TODO: Figure out how to not be inefficient with these changes
     isempty(used_intrinsics) && return used_intrinsics
     nargs = length(used_intrinsics)
 
@@ -256,7 +257,27 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         LLVM.name!(f, fn * ".orig")
 
         # create a new function
-        new_param_types = LLVMType[parameters(ft)...]
+        new_param_types = LLVMType[]
+
+        metal_struct_names = [:MtlDeviceArray, :MtlDeviceMatrix, :MtlDeviceVector]
+        for (i, param) in enumerate(job.source.tt.parameters)
+            # Create Metal device array struct type and
+            # alter MtlDeviceArrays to have correct addresspace
+            if param.name.name in metal_struct_names
+                println("Found mtldevicestruct $param at index $i")
+                # Make struct type for Metal device array
+                struct_typ = LLVM.StructType("MetalDeviceArray"; ctx)
+                elems = collect(elements(convert(LLVMType, param; ctx)))
+                elems[1] = LLVM.PointerType(convert(LLVM.LLVMType, param.parameters[1]), param.parameters[3])
+                elements!(struct_typ, elems)
+                # Alter addresspace of struct type to match Metal device array
+                param_typ = LLVM.PointerType(struct_typ, param.parameters[3])
+                push!(new_param_types, param_typ)
+            else
+                push!(new_param_types, parameters(ft)[i])
+            end
+        end
+
         for intr_fn in used_intrinsics
             llvm_typ = convert(LLVMType, kernel_intrinsics[intr_fn].julia_typ; ctx)
             push!(new_param_types, llvm_typ)
