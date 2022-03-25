@@ -41,9 +41,20 @@ const LLVMMETALKERNELCallConv = LLVM.API.LLVMCallConv(103)
 
 const metal_struct_names = [:MtlDeviceArray, :MtlDeviceMatrix, :MtlDeviceVector]
 
-# Metal does not handle double, long long, unsigned long long, and long double datatypes
-# UInt128 and Int128 worked in initial testing
-const invalid_mtl_types = [Float64] # XXX: Do this check earlier and in Metal.jl?
+# Initial mapping of types - There has to be a better way
+const jl_type_to_c = Dict(
+                    Float32 => "float",
+                    Float16 => "half",
+                    Int64   => "long",
+                    UInt64  => "ulong",
+                    Int32   => "int",
+                    UInt32  => "uint",
+                    Int16   => "short",
+                    UInt16  => "ushort",
+                    Int8    => "char",
+                    UInt8   => "uchar",
+                    Bool    => "char" # xxx: ?
+                )
 
 function process_module!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
     # calling convention
@@ -521,9 +532,9 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                 push!(argbuf_info, MDString("air.arg_type_size"; ctx))
                 push!(argbuf_info, Metadata(ConstantInt(Int32(sizeof(arg.typ)); ctx))) # Arg type size
                 push!(argbuf_info, MDString("air.arg_type_align_size"; ctx))
-                push!(argbuf_info, Metadata(ConstantInt(Int32(Base.datatype_alignment(arg.typ)); ctx))) # TODO: How to properly calculate this?
+                push!(argbuf_info, Metadata(ConstantInt(Int32(Base.datatype_alignment(arg.typ)); ctx)))
                 push!(argbuf_info, MDString("air.arg_type_name"; ctx))
-                push!(argbuf_info, MDString(string(arg.typ); ctx)) # TODO: Figure out what to put here. Does it matter?
+                push!(argbuf_info, MDString(string(arg.typ); ctx))
                 push!(argbuf_info, MDString("air.arg_name"; ctx))
                 push!(argbuf_info, MDString("arg_$(arg.codegen.i-1)"; ctx)) # TODO: How to get this? Does the compiler job have it somewhere?
                 # Ignore unused flag for now
@@ -535,7 +546,6 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             # Process simple pointer as simple buffer
             else
                 ptr_datatype = arg.typ.parameters[1]
-                ptr_datatype in invalid_mtl_types && error("Invalid datatype of $ptr_datatype in Metal kernel")
 
                 arg_info_ptr = Metadata[]
                 push!(arg_info_ptr, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx))) # Argument index
@@ -549,7 +559,13 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                 push!(arg_info_ptr, MDString("air.arg_type_align_size"; ctx))
                 push!(arg_info_ptr, Metadata(ConstantInt(Int32(Base.datatype_alignment(ptr_datatype)); ctx)))
                 push!(arg_info_ptr, MDString("air.arg_type_name"; ctx))
-                push!(arg_info_ptr, MDString(string(eltype(arg.codegen.typ)); ctx)) # TODO: Get properly
+                # Handle naming for pointer to ArrayType 
+                if typeof(eltype(arg.codegen.typ)) == LLVM.ArrayType
+                    arg_type_name = jl_type_to_c[eltype(eltype(arg.typ))] * string(length(eltype(arg.codegen.typ)))
+                else
+                    arg_type_name = string(eltype(arg.codegen.typ))
+                end
+                push!(arg_info_ptr, MDString(arg_type_name; ctx)) # TODO: Get properly
                 push!(arg_info_ptr, MDString("air.arg_name"; ctx))
                 # TODO: Properly get top-level argument names
                 arg_name = field_info != nothing ? string(field_info[2]) : "arg_$(arg.codegen.i)"
@@ -567,7 +583,6 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
         # Process as basic leaf argument
         else
-            # if typeof(arg.codegen.typ) == ArrayType
             arg_info = Metadata[]
 
             # If it's a top-level arg, encode as a buffer
@@ -594,7 +609,6 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     # Kernel argument name
 
                 datatype = arg.typ
-                datatype in invalid_mtl_types && error("Invalid datatype of $datatype in Metal kernel")
 
                 arg_info_ptr = Metadata[]
                 push!(arg_info_ptr, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
@@ -614,19 +628,26 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                 arg_name = field_info != nothing ? string(field_info[2]) : "arg_$(arg.codegen.i)"
                 push!(arg_info_ptr, MDString(arg_name; ctx))
 
-            # Else process as regular buffer
-            else
-                push!(arg_info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx))) # Field index
+            # Else process as indirect_constant (vector type)
+            # TODO: Need to check upstream that we're only passing valid vector types
+            elseif typeof(arg.codegen.typ) == LLVM.ArrayType
+                # Ensure valid length (<5)
+                arg_length = length(arg.codegen.typ) 
+                arg_length > 4 && error("Invalid Metal kernel ArrayType argument length of $arg_length")
+
+                push!(arg_info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
                 push!(arg_info, MDString("air.indirect_constant"; ctx))
                 push!(arg_info, MDString("air.location_index"; ctx))
-                push!(arg_info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx))) # Field index again?
+                push!(arg_info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
                 push!(arg_info, Metadata(ConstantInt(Int32(1); ctx)))
                 push!(arg_info, MDString("air.arg_type_name"; ctx))
-                # use eltype(arg.codegen.typ)
-                push!(arg_info, MDString("uint$(Int(length(arg.codegen.typ)))"; ctx)) # Typename - TODO: properly get
+                arg_type_name = jl_type_to_c[eltype(arg.typ)] * string(arg_length)
+                push!(arg_info, MDString(arg_type_name; ctx))
                 push!(arg_info, MDString("air.arg_name"; ctx))
                 arg_name = field_info != nothing ? string(field_info[2]) : "arg_$(arg.codegen.i)"
                 push!(arg_info, MDString(arg_name; ctx))
+            else
+                error("Unknown Metal kernel argument type $(arg.typ)")
             end
 
             return arg_info
