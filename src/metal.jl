@@ -270,7 +270,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             if param.name.name in metal_struct_names
                 ## Unnamed struct - Named structs give the metadata generation trouble
                 elems = collect(elements(convert(LLVMType, param; ctx)))
-                elems[1] = LLVM.PointerType(convert(LLVM.LLVMType, param.parameters[1]), param.parameters[3])
+                elems[1] = LLVM.PointerType(convert(LLVM.LLVMType, param.parameters[1]; ctx), param.parameters[3])
                 struct_typ = LLVM.StructType(elems; ctx)
                 # Alter addresspace of struct type to match Metal device array
                 param_typ = LLVM.PointerType(struct_typ, param.parameters[3])
