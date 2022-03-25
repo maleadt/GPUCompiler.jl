@@ -280,7 +280,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             elseif param <: Core.LLVMPtr
                 param_typ = LLVM.PointerType(convert(LLVMType, param.parameters[1]), param.parameters[2])
                 push!(new_param_types, param_typ)
-            
+
             # Don't alter any other argument types
             else
                 push!(new_param_types, parameters(ft)[i])
@@ -434,7 +434,7 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             # Process pointer to structs as argument buffers
             if typeof(eltype(arg.codegen.typ)) == LLVM.StructType
                 argbuf_info = Metadata[]
-                
+
                 # Get information about struct elements first
                 new_codegen_typ = eltype(arg.codegen.typ)
                 struct_info = add_md((typ=arg.typ, codegen=(typ=new_codegen_typ, i=1)), level+1)
@@ -452,7 +452,7 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     # Field type
                     # Field name
                     # Field argument type? (mainly air.indirect_argument)
-                        # With structs with the threadgroup addresspace, this metadata node is not present 
+                        # With structs with the threadgroup addresspace, this metadata node is not present
                         # Because each threadgroup gets the struct data directly without redirection??
                     # If the element is itself a struct directly (not a reference to a struct)
                         # Location index of the element struct in the higher-level struct
@@ -471,7 +471,7 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                 end
 
                 for (i,struct_field_info) in enumerate(struct_info)
-                    
+
                     type_name, field_name = parse_struct_names(struct_field_info)
                     field_is_struct = typeof(arg.typ) == LLVM.StructType
 
@@ -491,7 +491,7 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                         push!(struct_type_info, Metadata(ConstantInt(Int32(sizeof(eltype(field_type))); ctx))) # Field element size
                         push!(struct_type_info, Metadata(ConstantInt(Int32(length(field_type.parameters)); ctx))) # Length of field
                     end
-                    push!(struct_type_info, type_name) # Field type 
+                    push!(struct_type_info, type_name) # Field type
                     push!(struct_type_info, field_name) # Field name
                     push!(struct_type_info, MDString("air.indirect_argument"; ctx))
 
@@ -502,9 +502,9 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                         push!(struct_type_info, struct_field_info)
                     end
                 end
-                
+
                 struct_type_info = MDNode(struct_type_info; ctx)
-                
+
                 # Add argument buffer details
                 # Create the argument buffer main metadata
                 push!(argbuf_info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx))) # Argument index
@@ -512,8 +512,8 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                 push!(argbuf_info, MDString("air.buffer_size"; ctx))
                 push!(argbuf_info, Metadata(ConstantInt(Int32(sizeof(arg.typ)); ctx)))
                 push!(argbuf_info, MDString("air.location_index"; ctx))
-                push!(argbuf_info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx))) 
-                push!(argbuf_info, Metadata(ConstantInt(Int32(1); ctx))) 
+                push!(argbuf_info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
+                push!(argbuf_info, Metadata(ConstantInt(Int32(1); ctx)))
                 # TODO: Check for const array and put to air.read
                 push!(argbuf_info, MDString("air.read_write"; ctx))
                 push!(argbuf_info, MDString("air.struct_type_info"; ctx))
@@ -531,7 +531,7 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                 # Make argument buffer metadata node
                 argbuf_info = MDNode(argbuf_info; ctx)
                 return argbuf_info
-            
+
             # Process simple pointer as simple buffer
             else
                 ptr_datatype = arg.typ.parameters[1]
@@ -583,7 +583,7 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                         # Note that these indices are unique to each resource group type [buffer, threadgroup, sampler, texture]
                     # Unknown value - Has always been 1
                         # Vertex/stag_in info? Something with rasters?
-                    # Resource usage status 
+                    # Resource usage status
                     # air.arg_type_size keyword
                     # Buffer element size
                     # air.arg_type_align_size keyword
