@@ -36,7 +36,10 @@ needs_byval(job::CompilerJob{MetalCompilerTarget}) = false
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
 runtime_slug(job::CompilerJob{MetalCompilerTarget}) = "metal-macos$(job.target.macos)"
 
-const LLVMMETALFUNCCallConv = LLVM.API.LLVMCallConv(102)
+isintrinsic(@nospecialize(job::CompilerJob{MetalCompilerTarget}), fn::String) =
+    return startswith(fn, "air.")
+
+const LLVMMETALFUNCCallConv   = LLVM.API.LLVMCallConv(102)
 const LLVMMETALKERNELCallConv = LLVM.API.LLVMCallConv(103)
 
 const metal_struct_names = [:MtlDeviceArray, :MtlDeviceMatrix, :MtlDeviceVector]
@@ -86,6 +89,12 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
     if job.source.kernel
         # Change intrinsics to be input arguments as necessary and add metadata
         arguments = add_input_arguments!(job, mod, entry)
+
+        # Alter air intrinsic names
+        for func in collect(LLVM.functions(mod))
+            !startswith(name(func), "julia.air") && continue
+            LLVM.name!(func, name(func)[7:end])
+        end
         entry = LLVM.functions(mod)[entry_fn]
         add_metadata!(job, mod, entry, arguments)
 
@@ -674,7 +683,7 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     for (i, intr_fn) in enumerate(used_intrinsics)
         arg_info = Metadata[]
         push!(arg_info, Metadata(ConstantInt(Int32(length(parameters(entry))-i); ctx)))
-        push!(arg_info, MDString("air." * kernel_intrinsics[intr_fn].air_intr[1:end-5]; ctx))
+        push!(arg_info, MDString("air." * kernel_intrinsics[intr_fn].air_name; ctx))
         push!(arg_info, MDString("air.arg_type_name"; ctx))
         push!(arg_info, MDString(kernel_intrinsics[intr_fn].air_typ; ctx))
         push!(arg_info, MDString("air.arg_name"; ctx))
