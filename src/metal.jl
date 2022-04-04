@@ -289,7 +289,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
             # Give opaque LLVMPtrs the appropriate type
             elseif param <: Core.LLVMPtr
-                param_typ = LLVM.PointerType(convert(LLVMType, param.parameters[1]), param.parameters[2])
+                param_typ = LLVM.PointerType(convert(LLVMType, param.parameters[1]; ctx), param.parameters[2])
                 push!(new_param_types, param_typ)
 
             # Don't alter any other argument types
@@ -559,7 +559,7 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                 push!(arg_info_ptr, MDString("air.arg_type_align_size"; ctx))
                 push!(arg_info_ptr, Metadata(ConstantInt(Int32(Base.datatype_alignment(ptr_datatype)); ctx)))
                 push!(arg_info_ptr, MDString("air.arg_type_name"; ctx))
-                # Handle naming for pointer to ArrayType 
+                # Handle naming for pointer to ArrayType
                 if typeof(eltype(arg.codegen.typ)) == LLVM.ArrayType
                     arg_type_name = jl_type_to_c[eltype(eltype(arg.typ))] * string(length(eltype(arg.codegen.typ)))
                 else
@@ -632,7 +632,7 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             # TODO: Need to check upstream that we're only passing valid vector types
             elseif typeof(arg.codegen.typ) == LLVM.ArrayType
                 # Ensure valid length (<5)
-                arg_length = length(arg.codegen.typ) 
+                arg_length = length(arg.codegen.typ)
                 arg_length > 4 && error("Invalid Metal kernel ArrayType argument length of $arg_length")
 
                 push!(arg_info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
