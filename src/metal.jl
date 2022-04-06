@@ -246,7 +246,6 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         haskey(functions(mod), intr_fn)
     end |> collect
     # TODO: Figure out how to not be inefficient with these changes
-    isempty(used_intrinsics) && return used_intrinsics
     nargs = length(used_intrinsics)
 
     # determine which functions need these arguments
