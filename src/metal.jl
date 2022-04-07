@@ -140,14 +140,15 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
     @compiler_assert return_type(ft) == LLVM.VoidType(ctx) job
 
     # generate the new function type & definition
+    args = classify_arguments(job, ft)
     new_types = LLVM.LLVMType[]
-    for param in parameters(ft)
-        if !isa(param, LLVM.PointerType)
+    for arg in args
+        if arg.cc == BITS_VALUE && !(arg.typ <: Ptr || arg.typ <: Core.LLVMPtr)
             # pass the value as a reference instead
-            push!(new_types, LLVM.PointerType(param, #=Constant=# 1))
+            push!(new_types, LLVM.PointerType(arg.codegen.typ, #=Constant=# 1))
             # TODO: other attributes (nocapturem nonnull, readonly, align, dereferenceable)?
-        else
-            push!(new_types, param)
+        elseif arg.cc != GHOST
+            push!(new_types, arg.codegen.typ)
         end
     end
     new_ft = LLVM.FunctionType(return_type(ft), new_types)
@@ -164,15 +165,15 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
         position!(builder, entry)
 
         # perform argument conversions
-        for (i, param) in enumerate(parameters(ft))
-            if !isa(param, LLVM.PointerType)
+        for arg in args
+            if arg.cc == BITS_VALUE && !(arg.typ <: Ptr || arg.typ <: Core.LLVMPtr)
                 # load the reference to get a value back
-                val = load!(builder, parameters(new_f)[i])
+                val = load!(builder, parameters(new_f)[arg.codegen.i])
                 push!(new_args, val)
-            else
-                push!(new_args, parameters(new_f)[i])
-                for attr in collect(parameter_attributes(f, i))
-                    push!(parameter_attributes(new_f, i), attr)
+            elseif arg.cc != GHOST
+                push!(new_args, parameters(new_f)[arg.codegen.i])
+                for attr in collect(parameter_attributes(f, arg.codegen.i))
+                    push!(parameter_attributes(new_f, arg.codegen.i), attr)
                 end
             end
         end
