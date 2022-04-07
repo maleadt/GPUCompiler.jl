@@ -697,7 +697,7 @@ end
 
 @unlocked function mcgen(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.API.LLVMObjectFile)
-    # translate to SPIR-V
+    # translate to metallib
     input = tempname(cleanup=false) * ".bc"
     translated = tempname(cleanup=false) * ".metallib"
     write(input, mod)
