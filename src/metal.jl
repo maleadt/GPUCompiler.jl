@@ -351,11 +351,6 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                 param_typ = LLVM.PointerType(struct_typ, param.parameters[3])
                 push!(new_param_types, param_typ)
 
-            # Give opaque LLVMPtrs the appropriate type
-            elseif param <: Core.LLVMPtr
-                param_typ = LLVM.PointerType(convert(LLVMType, param.parameters[1]; ctx), param.parameters[2])
-                push!(new_param_types, param_typ)
-
             # Don't alter any other argument types
             else
                 push!(new_param_types, parameters(ft)[i])
