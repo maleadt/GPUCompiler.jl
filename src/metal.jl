@@ -89,12 +89,6 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
     if job.source.kernel
         # Change intrinsics to be input arguments as necessary and add metadata
         arguments = add_input_arguments!(job, mod, entry)
-
-        # Alter air intrinsic names
-        for func in collect(LLVM.functions(mod))
-            !startswith(name(func), "julia.air") && continue
-            LLVM.name!(func, name(func)[7:end])
-        end
         entry = LLVM.functions(mod)[entry_fn]
         add_metadata!(job, mod, entry, arguments)
 
