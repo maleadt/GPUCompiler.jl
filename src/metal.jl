@@ -30,6 +30,7 @@ llvm_datalayout(target::MetalCompilerTarget) =
 
 needs_byval(job::CompilerJob{MetalCompilerTarget}) = false
 
+
 ## job
 
 # TODO: encode debug build or not in the compiler job
@@ -64,7 +65,7 @@ function process_module!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module
     for f in functions(mod)
         #callconv!(f, LLVMMETALFUNCCallConv)
         # XXX: this makes InstCombine erase kernel->func calls.
-        #      do we even need this? why?
+        #      do we even need this? if we do, do so in metallib-instead.
     end
 end
 
@@ -87,114 +88,51 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
     entry_fn = LLVM.name(entry)
 
     if job.source.kernel
-        # Change intrinsics to be input arguments as necessary and add metadata
         arguments = add_input_arguments!(job, mod, entry)
         entry = LLVM.functions(mod)[entry_fn]
-        add_metadata!(job, mod, entry, arguments)
 
-        # TESTING: Adding llvm.module.flags
-        # wchar_size = 4
-        # wchar_key = "wchar_size"
-        wchar_md = Metadata[]
-        push!(wchar_md, Metadata(ConstantInt(Int32(1); ctx)))
-        push!(wchar_md, MDString("wchar_size"; ctx))
-        push!(wchar_md, Metadata(ConstantInt(Int32(4); ctx)))
-        wchar_md = MDNode(wchar_md; ctx)
-        push!(metadata(mod)["llvm.module.flags"], wchar_md)
+        add_argument_metadata!(job, mod, entry, arguments)
 
-        # LLVM.API.LLVMAddModuleFlag(mod, LLVM.API.LLVMModuleFlagBehavior(1),
-        #         Cstring(pointer(wchar_key)), Csize_t(length(wchar_key)),
-        #         wchar_md)
-
-        # !4 = !{i32 7, !"air.max_device_buffers", i32 31}
-        max_buff = Metadata[]
-        max_buff_key = "air.max_device_buffers"
-        push!(max_buff, Metadata(ConstantInt(Int32(7); ctx)))
-        push!(max_buff, MDString("air.max_device_buffers"; ctx))
-        push!(max_buff, Metadata(ConstantInt(Int32(31); ctx)))
-        max_buff = MDNode(max_buff; ctx)
-        push!(metadata(mod)["llvm.module.flags"], max_buff)
-
-        # LLVM.API.LLVMAddModuleFlag(mod, LLVM.API.LLVMModuleFlagBehavior(7),
-        #         Cstring(pointer(max_buff_key)), Csize_t(length(max_buff_key)),
-        #         max_buff)
-
-        # !5 = !{i32 7, !"air.max_constant_buffers", i32 31}
-        max_const_buff_md = Metadata[]
-        push!(max_const_buff_md, Metadata(ConstantInt(Int32(7); ctx)))
-        push!(max_const_buff_md, MDString("air.max_constant_buffers"; ctx))
-        push!(max_const_buff_md, Metadata(ConstantInt(Int32(31); ctx)))
-        max_const_buff_md = MDNode(max_const_buff_md; ctx)
-        push!(metadata(mod)["llvm.module.flags"], max_const_buff_md)
-
-        # !6 = !{i32 7, !"air.max_threadgroup_buffers", i32 31}
-        max_threadgroup_buff_md = Metadata[]
-        push!(max_threadgroup_buff_md, Metadata(ConstantInt(Int32(7); ctx)))
-        push!(max_threadgroup_buff_md, MDString("air.max_threadgroup_buffers"; ctx))
-        push!(max_threadgroup_buff_md, Metadata(ConstantInt(Int32(31); ctx)))
-        max_threadgroup_buff_md = MDNode(max_threadgroup_buff_md; ctx)
-        push!(metadata(mod)["llvm.module.flags"], max_threadgroup_buff_md)
-
-        # !7 = !{i32 7, !"air.max_textures", i32 128}
-        max_textures_md = Metadata[]
-        push!(max_textures_md, Metadata(ConstantInt(Int32(7); ctx)))
-        push!(max_textures_md, MDString("air.max_textures"; ctx))
-        push!(max_textures_md, Metadata(ConstantInt(Int32(128); ctx)))
-        max_textures_md = MDNode(max_textures_md; ctx)
-        push!(metadata(mod)["llvm.module.flags"], max_textures_md)
-
-        # !8 = !{i32 7, !"air.max_read_write_textures", i32 8}
-        max_rw_textures_md = Metadata[]
-        push!(max_rw_textures_md, Metadata(ConstantInt(Int32(7); ctx)))
-        push!(max_rw_textures_md, MDString("air.max_read_write_textures"; ctx))
-        push!(max_rw_textures_md, Metadata(ConstantInt(Int32(8); ctx)))
-        max_rw_textures_md = MDNode(max_rw_textures_md; ctx)
-        push!(metadata(mod)["llvm.module.flags"], max_rw_textures_md)
-
-        # !9 = !{i32 7, !"air.max_samplers", i32 16}
-        max_samplers_md = Metadata[]
-        push!(max_samplers_md, Metadata(ConstantInt(Int32(7); ctx)))
-        push!(max_samplers_md, MDString("air.max_samplers"; ctx))
-        push!(max_samplers_md, Metadata(ConstantInt(Int32(16); ctx)))
-        max_samplers_md = MDNode(max_samplers_md; ctx)
-        push!(metadata(mod)["llvm.module.flags"], max_samplers_md)
-
-
-        # function LLVMAddModuleFlag(M, Behavior, Key, KeyLen, Val)
-        #     ccall((:LLVMAddModuleFlag, libllvm[]), Cvoid, (LLVMModuleRef, LLVMModuleFlagBehavior, Cstring, Csize_t, LLVMMetadataRef), M, Behavior, Key, KeyLen, Val)
-        # end
-
-        # Add llvm.ident
-        # !llvm.ident = !{!10}
-        # !10 = !{!"Apple metal version 31001.363 (metalfe-31001.363)"}
-        llvm_ident_md = Metadata[]
-        push!(llvm_ident_md, MDString("Apple metal version 31001.363 (metalfe-31001.363)"; ctx))
-        llvm_ident_md = MDNode(llvm_ident_md; ctx)
-        push!(metadata(mod)["llvm.ident"], llvm_ident_md)
-
-
-        # Add air version metadata
-        air_md = Metadata[]
-        push!(air_md, Metadata(ConstantInt(Int32(2); ctx)))
-        push!(air_md, Metadata(ConstantInt(Int32(4); ctx)))
-        push!(air_md, Metadata(ConstantInt(Int32(0); ctx)))
-        air_md = MDNode(air_md; ctx)
-        push!(metadata(mod)["air.version"], air_md)
-
-        # !air.language_version = !{!12}
-        # !12 = !{!"Metal", i32 2, i32 4, i32 0}
-        air_lang_md = Metadata[]
-        push!(air_lang_md, MDString("Metal"; ctx))
-        push!(air_lang_md, Metadata(ConstantInt(Int32(2); ctx)))
-        push!(air_lang_md, Metadata(ConstantInt(Int32(4); ctx)))
-        push!(air_lang_md, Metadata(ConstantInt(Int32(0); ctx)))
-        air_lang_md = MDNode(air_lang_md; ctx)
-        push!(metadata(mod)["air.language_version"], air_lang_md)
-
+        add_module_metadata!(job, mod)
     end
 
     return functions(mod)[entry_fn]
 end
+
+@unlocked function mcgen(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
+                         format=LLVM.API.LLVMObjectFile)
+    # translate to metallib
+    input = tempname(cleanup=false) * ".bc"
+    translated = tempname(cleanup=false) * ".metallib"
+    write(input, mod)
+    Metal_LLVM_Tools_jll.metallib_as() do assembler
+        proc = run(ignorestatus(`$assembler -o $translated $input`))
+        if !success(proc)
+            error("""Failed to translate LLVM code to MetalLib.
+                     If you think this is a bug, please file an issue and attach $(input).""")
+        end
+    end
+
+    output = if format == LLVM.API.LLVMObjectFile
+        read(translated)
+    else
+        # disassemble
+        Metal_LLVM_Tools_jll.metallib_dis() do disassembler
+            read(`$disassembler -o - $translated`, String)
+        end
+    end
+
+    rm(input)
+    rm(translated)
+
+    return output
+end
+
+
+# kernel input arguments
+#
+# hardware index counters (thread id, group id, etc) aren't accessed via intrinsics,
+# but using special arguments to the kernel function.
 
 const kernel_intrinsics = Dict()
 for intr in [
@@ -435,8 +373,13 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     return used_intrinsics
 end
 
-function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                       entry::LLVM.Function, used_intrinsics::Vector)
+
+# argument metadata generation
+#
+# module metadata is used to identify buffers that are passed as kernel arguments.
+
+function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                                entry::LLVM.Function, used_intrinsics::Vector)
     ctx = context(mod)
 
     # Recursively generate metadata for normal kernel arguments
@@ -695,31 +638,83 @@ function add_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     return
 end
 
-@unlocked function mcgen(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
-                         format=LLVM.API.LLVMObjectFile)
-    # translate to metallib
-    input = tempname(cleanup=false) * ".bc"
-    translated = tempname(cleanup=false) * ".metallib"
-    write(input, mod)
-    Metal_LLVM_Tools_jll.metallib_as() do assembler
-        proc = run(ignorestatus(`$assembler -o $translated $input`))
-        if !success(proc)
-            error("""Failed to translate LLVM code to MetalLib.
-                     If you think this is a bug, please file an issue and attach $(input).""")
-        end
-    end
 
-    output = if format == LLVM.API.LLVMObjectFile
-        read(translated)
-    else
-        # disassemble
-        Metal_LLVM_Tools_jll.metallib_dis() do disassembler
-            read(`$disassembler -o - $translated`, String)
-        end
-    end
+# module-level metadata
 
-    rm(input)
-    rm(translated)
+# TODO: determine limits being set dynamically
+function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    ctx = context(mod)
 
-    return output
+    # register max device buffer count
+    max_buff = Metadata[]
+    push!(max_buff, Metadata(ConstantInt(Int32(7); ctx)))
+    push!(max_buff, MDString("air.max_device_buffers"; ctx))
+    push!(max_buff, Metadata(ConstantInt(Int32(31); ctx)))
+    max_buff = MDNode(max_buff; ctx)
+    push!(metadata(mod)["llvm.module.flags"], max_buff)
+
+    # register max constant buffer count
+    max_const_buff_md = Metadata[]
+    push!(max_const_buff_md, Metadata(ConstantInt(Int32(7); ctx)))
+    push!(max_const_buff_md, MDString("air.max_constant_buffers"; ctx))
+    push!(max_const_buff_md, Metadata(ConstantInt(Int32(31); ctx)))
+    max_const_buff_md = MDNode(max_const_buff_md; ctx)
+    push!(metadata(mod)["llvm.module.flags"], max_const_buff_md)
+
+    # register max threadgroup buffer count
+    max_threadgroup_buff_md = Metadata[]
+    push!(max_threadgroup_buff_md, Metadata(ConstantInt(Int32(7); ctx)))
+    push!(max_threadgroup_buff_md, MDString("air.max_threadgroup_buffers"; ctx))
+    push!(max_threadgroup_buff_md, Metadata(ConstantInt(Int32(31); ctx)))
+    max_threadgroup_buff_md = MDNode(max_threadgroup_buff_md; ctx)
+    push!(metadata(mod)["llvm.module.flags"], max_threadgroup_buff_md)
+
+    # register max texture buffer count
+    max_textures_md = Metadata[]
+    push!(max_textures_md, Metadata(ConstantInt(Int32(7); ctx)))
+    push!(max_textures_md, MDString("air.max_textures"; ctx))
+    push!(max_textures_md, Metadata(ConstantInt(Int32(128); ctx)))
+    max_textures_md = MDNode(max_textures_md; ctx)
+    push!(metadata(mod)["llvm.module.flags"], max_textures_md)
+
+    # register max write texture buffer count
+    max_rw_textures_md = Metadata[]
+    push!(max_rw_textures_md, Metadata(ConstantInt(Int32(7); ctx)))
+    push!(max_rw_textures_md, MDString("air.max_read_write_textures"; ctx))
+    push!(max_rw_textures_md, Metadata(ConstantInt(Int32(8); ctx)))
+    max_rw_textures_md = MDNode(max_rw_textures_md; ctx)
+    push!(metadata(mod)["llvm.module.flags"], max_rw_textures_md)
+
+    # register max sampler count
+    max_samplers_md = Metadata[]
+    push!(max_samplers_md, Metadata(ConstantInt(Int32(7); ctx)))
+    push!(max_samplers_md, MDString("air.max_samplers"; ctx))
+    push!(max_samplers_md, Metadata(ConstantInt(Int32(16); ctx)))
+    max_samplers_md = MDNode(max_samplers_md; ctx)
+    push!(metadata(mod)["llvm.module.flags"], max_samplers_md)
+
+    # add compiler identification
+    llvm_ident_md = Metadata[]
+    push!(llvm_ident_md, MDString("Julia $(VERSION) with Metal.jl"; ctx))
+    llvm_ident_md = MDNode(llvm_ident_md; ctx)
+    push!(metadata(mod)["llvm.ident"], llvm_ident_md)
+
+    # add AIR version
+    air_md = Metadata[]
+    push!(air_md, Metadata(ConstantInt(Int32(2); ctx)))
+    push!(air_md, Metadata(ConstantInt(Int32(4); ctx)))
+    push!(air_md, Metadata(ConstantInt(Int32(0); ctx)))
+    air_md = MDNode(air_md; ctx)
+    push!(metadata(mod)["air.version"], air_md)
+
+    # add language version
+    air_lang_md = Metadata[]
+    push!(air_lang_md, MDString("Metal"; ctx))
+    push!(air_lang_md, Metadata(ConstantInt(Int32(2); ctx)))
+    push!(air_lang_md, Metadata(ConstantInt(Int32(4); ctx)))
+    push!(air_lang_md, Metadata(ConstantInt(Int32(0); ctx)))
+    air_lang_md = MDNode(air_lang_md; ctx)
+    push!(metadata(mod)["air.language_version"], air_lang_md)
+
+    return
 end
