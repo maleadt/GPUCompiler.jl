@@ -101,6 +101,20 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
     return functions(mod)[entry_fn]
 end
 
+function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module,
+                                  entry::LLVM.Function)
+    entry = invoke(finish_ir!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+
+    ctx = context(mod)
+    entry_fn = LLVM.name(entry)
+
+    if job.source.kernel
+        add_address_spaces!(job, mod, entry)
+    end
+
+    return functions(mod)[entry_fn]
+end
+
 @unlocked function mcgen(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.API.LLVMObjectFile)
     # translate to metallib
@@ -128,6 +142,78 @@ end
     rm(translated)
 
     return output
+end
+
+
+# generic pointer removal
+#
+# every pointer argument (e.g. byref objs) to a kernel needs an address space attached.
+function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
+    ctx = context(mod)
+    ft = eltype(llvmtype(f))
+    @compiler_assert return_type(ft) == LLVM.VoidType(ctx) job
+
+    function remapType(src)
+        # TODO: recurse in structs
+        dst = if src isa LLVM.PointerType && addrspace(src) == 0
+            LLVM.PointerType(remapType(eltype(src)), #=device=# 1)
+        else
+            src
+        end
+        # TODO: cache
+        return dst
+    end
+
+    # generate the new function type & definition
+    new_types = map(parameters(ft)) do typ
+        remapType(typ)
+    end
+    new_ft = LLVM.FunctionType(return_type(ft), new_types)
+    new_f = LLVM.Function(mod, "", new_ft)
+    linkage!(new_f, linkage(f))
+    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
+        LLVM.name!(new_arg, LLVM.name(arg))
+    end
+
+    # map the parameters
+    value_map = Dict{LLVM.Value, LLVM.Value}(
+        param => new_param for (param, new_param) in zip(parameters(f), parameters(new_f))
+    )
+    value_map[f] = new_f
+
+    # before D96531 (part of LLVM 13), clone_into! wants to duplicate debug metadata
+    # when the functions are part of the same module. that is invalid, because it
+    # results in desynchronized debug intrinsics (GPUCompiler#284), so remove those.
+    if LLVM.version() < v"13"
+        removals = LLVM.Instruction[]
+        for bb in blocks(f), inst in instructions(bb)
+            if inst isa LLVM.CallInst && LLVM.name(called_value(inst)) == "llvm.dbg.declare"
+                push!(removals, inst)
+            end
+        end
+        for inst in removals
+            @assert isempty(uses(inst))
+            unsafe_delete!(LLVM.parent(inst), inst)
+        end
+        changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges
+    else
+        changes = LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly
+    end
+
+    function type_mapper(typ)
+        remapType(typ)
+    end
+
+    clone_into!(new_f, f; value_map, changes, type_mapper)
+    replace_uses!(f, new_f) # to update metadata
+    @assert isempty(uses(f))
+
+    # remove the old function
+    fn = LLVM.name(f)
+    unsafe_delete!(mod, f)
+    LLVM.name!(new_f, fn)
+
+    return new_f
 end
 
 
@@ -337,25 +423,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         ft = eltype(llvmtype(f))
         LLVM.name!(f, fn * ".orig")
         # create a new function
-        new_param_types = LLVMType[]
-
-        # Alter LLVM representation of Metal device arrays and Core.LLVMPtrs
-        for (i, param) in enumerate(job.source.tt.parameters)
-            # Alter MtlDeviceArrays to have correct addresspace
-            if param.name.name in metal_struct_names
-                ## Unnamed struct - Named structs give the metadata generation trouble
-                elems = collect(elements(convert(LLVMType, param; ctx)))
-                elems[1] = LLVM.PointerType(convert(LLVM.LLVMType, param.parameters[1]; ctx), param.parameters[3])
-                struct_typ = LLVM.StructType(elems; ctx)
-                # Alter addresspace of struct type to match Metal device array
-                param_typ = LLVM.PointerType(struct_typ, param.parameters[3])
-                push!(new_param_types, param_typ)
-
-            # Don't alter any other argument types
-            else
-                push!(new_param_types, parameters(ft)[i])
-            end
-        end
+        new_param_types = LLVMType[parameters(ft)...]
 
         for intr_fn in used_intrinsics
             llvm_typ = convert(LLVMType, kernel_intrinsics[intr_fn].julia_typ; ctx)
