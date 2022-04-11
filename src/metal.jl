@@ -165,9 +165,7 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
     end
 
     # generate the new function type & definition
-    new_types = map(parameters(ft)) do typ
-        remapType(typ)
-    end
+    new_types = LLVMType[remapType(typ) for typ in parameters(ft)]
     new_ft = LLVM.FunctionType(return_type(ft), new_types)
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
