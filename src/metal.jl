@@ -14,7 +14,7 @@ function Base.hash(target::MetalCompilerTarget, h::UInt)
     hash(target.macos, h)
 end
 
-source_code(target::MetalCompilerTarget) = "metal"
+source_code(target::MetalCompilerTarget) = "text"
 
 # Metal is not supported by our LLVM builds, so we can't get a target machine
 llvm_machine(::MetalCompilerTarget) = nothing
@@ -691,9 +691,7 @@ function add_md(arg; ctx, field_info=nothing, level=1)
         # Else process as indirect_constant (vector type)
         # TODO: Need to check upstream that we're only passing valid vector types
         elseif arg.codegen.typ isa LLVM.ArrayType
-            # Ensure valid length (<5)
             arg_length = length(arg.codegen.typ)
-            arg_length > 4 && error("Invalid Metal kernel ArrayType argument length of $arg_length")
 
             push!(arg_info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
             push!(arg_info, MDString("air.indirect_constant"; ctx))
