@@ -226,19 +226,21 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
     # generate the new function type & definition
     args = classify_arguments(job, ft)
     new_types = LLVM.LLVMType[]
+    bits_as_reference = BitVector(undef, length(parameters(ft)))
     for arg in args
         if arg.cc == BITS_VALUE && !(arg.typ <: Ptr || arg.typ <: Core.LLVMPtr)
             # pass the value as a reference instead
             push!(new_types, LLVM.PointerType(arg.codegen.typ, #=Constant=# 1))
-            # TODO: other attributes (nocapturem nonnull, readonly, align, dereferenceable)?
+            bits_as_reference[arg.codegen.i] = true
         elseif arg.cc != GHOST
             push!(new_types, arg.codegen.typ)
+            bits_as_reference[arg.codegen.i] = false
         end
     end
     new_ft = LLVM.FunctionType(return_type(ft), new_types)
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
-    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
+    for (i, (arg, new_arg)) in enumerate(zip(parameters(f), parameters(new_f)))
         LLVM.name!(new_arg, LLVM.name(arg))
     end
 
@@ -250,14 +252,13 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
 
         # perform argument conversions
         for arg in args
-            if arg.cc == BITS_VALUE && !(arg.typ <: Ptr || arg.typ <: Core.LLVMPtr)
-                # load the reference to get a value back
-                val = load!(builder, parameters(new_f)[arg.codegen.i])
-                push!(new_args, val)
-            elseif arg.cc != GHOST
-                push!(new_args, parameters(new_f)[arg.codegen.i])
-                for attr in collect(parameter_attributes(f, arg.codegen.i))
-                    push!(parameter_attributes(new_f, arg.codegen.i), attr)
+            if arg.cc != GHOST
+                if bits_as_reference[arg.codegen.i]
+                    # load the reference to get a value back
+                    val = load!(builder, parameters(new_f)[arg.codegen.i])
+                    push!(new_args, val)
+                else
+                    push!(new_args, parameters(new_f)[arg.codegen.i])
                 end
             end
         end
@@ -273,6 +274,20 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
 
         # fall through
         br!(builder, blocks(new_f)[2])
+    end
+
+    # set the attributes (needs to happen _after_ cloning)
+    # TODO: verify that clone copies other attributes,
+    #       and that other uses of clone don't set parameters before cloning
+    for i in 1:length(parameters(new_f))
+        if bits_as_reference[i]
+            # add appropriate attributes
+            # TODO: other attributes (nonnull, readonly, align, dereferenceable)?
+            ## we've just emitted a load, so the pointer itself cannot be captured
+            push!(parameter_attributes(new_f, i), EnumAttribute("nocapture", 0; ctx))
+            ## Metal.jl emits separate buffers for each scalar argument
+            push!(parameter_attributes(new_f, i), EnumAttribute("noalias", 0; ctx))
+        end
     end
 
     # remove the old function
