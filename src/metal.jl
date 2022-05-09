@@ -226,19 +226,21 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
     # generate the new function type & definition
     args = classify_arguments(job, ft)
     new_types = LLVM.LLVMType[]
+    bits_as_reference = BitVector(undef, length(parameters(ft)))
     for arg in args
         if arg.cc == BITS_VALUE && !(arg.typ <: Ptr || arg.typ <: Core.LLVMPtr)
             # pass the value as a reference instead
             push!(new_types, LLVM.PointerType(arg.codegen.typ, #=Constant=# 1))
-            # TODO: other attributes (nocapturem nonnull, readonly, align, dereferenceable)?
+            bits_as_reference[arg.codegen.i] = true
         elseif arg.cc != GHOST
             push!(new_types, arg.codegen.typ)
+            bits_as_reference[arg.codegen.i] = false
         end
     end
     new_ft = LLVM.FunctionType(return_type(ft), new_types)
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
-    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
+    for (i, (arg, new_arg)) in enumerate(zip(parameters(f), parameters(new_f)))
         LLVM.name!(new_arg, LLVM.name(arg))
     end
 
@@ -250,14 +252,13 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
 
         # perform argument conversions
         for arg in args
-            if arg.cc == BITS_VALUE && !(arg.typ <: Ptr || arg.typ <: Core.LLVMPtr)
-                # load the reference to get a value back
-                val = load!(builder, parameters(new_f)[arg.codegen.i])
-                push!(new_args, val)
-            elseif arg.cc != GHOST
-                push!(new_args, parameters(new_f)[arg.codegen.i])
-                for attr in collect(parameter_attributes(f, arg.codegen.i))
-                    push!(parameter_attributes(new_f, arg.codegen.i), attr)
+            if arg.cc != GHOST
+                if bits_as_reference[arg.codegen.i]
+                    # load the reference to get a value back
+                    val = load!(builder, parameters(new_f)[arg.codegen.i])
+                    push!(new_args, val)
+                else
+                    push!(new_args, parameters(new_f)[arg.codegen.i])
                 end
             end
         end
@@ -273,6 +274,20 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
 
         # fall through
         br!(builder, blocks(new_f)[2])
+    end
+
+    # set the attributes (needs to happen _after_ cloning)
+    # TODO: verify that clone copies other attributes,
+    #       and that other uses of clone don't set parameters before cloning
+    for i in 1:length(parameters(new_f))
+        if bits_as_reference[i]
+            # add appropriate attributes
+            # TODO: other attributes (nonnull, readonly, align, dereferenceable)?
+            ## we've just emitted a load, so the pointer itself cannot be captured
+            push!(parameter_attributes(new_f, i), EnumAttribute("nocapture", 0; ctx))
+            ## Metal.jl emits separate buffers for each scalar argument
+            push!(parameter_attributes(new_f, i), EnumAttribute("noalias", 0; ctx))
+        end
     end
 
     # remove the old function
@@ -493,222 +508,28 @@ end
 #
 # module metadata is used to identify buffers that are passed as kernel arguments.
 
-# Recursively generate metadata for normal kernel arguments
-function add_md(arg; ctx, field_info=nothing, level=1)
-    structinfo(T,i) = (fieldoffset(T,i), fieldname(T,i), fieldtype(T,i))
+# TODO: MDString(::Symbol)?
 
-    if arg.codegen.typ isa LLVM.PointerType
-        # Process pointer to structs as argument buffers
-        if eltype(arg.codegen.typ) isa LLVM.StructType
-            argbuf_info = Metadata[]
+# XXX: we translate Julia types to C typenames. that's not required, but reduces the diff
+#      while working on this code. after that, just report the full type name (no `nameof`)
+type_mapping = Dict(
+    "Int32" => "int",
+    "Int64" => "long",
+)
+function humanize_typename(typ)
+    name = string(nameof(typ))
+    get(type_mapping, name, name)
+end
 
-            # Get information about struct elements first
-            new_codegen_typ = eltype(arg.codegen.typ)
-            struct_info = add_md((typ=arg.typ, codegen=(typ=new_codegen_typ, i=1)); ctx, level=level+1)
-
-            # Create argument buffer's type metadata
-            struct_type_info = Metadata[]
-
-            # Struct element metadata format:
-                # If element is itself a struct directly (not a reference to a struct)
-                    # air.struct_type_info keyword
-                    # Metadata node of the struct (element struct - NOT a self-reference)
-                # Offset in bytes from start of struct
-                # Size of element in bytes (8 for buffers (pointer size))
-                # Length of element (0 for buffers...always?)
-                # Field type
-                # Field name
-                # Field argument type? (mainly air.indirect_argument)
-                    # With structs with the threadgroup addresspace, this metadata node is not present
-                    # Because each threadgroup gets the struct data directly without redirection??
-                # If the element is itself a struct directly (not a reference to a struct)
-                    # Location index of the element struct in the higher-level struct
-                # Metadata node to more details about element
-                # If argument is unused
-                    # air.arg_unused
-
-            # Return the struct element type name and field name from metadata
-            function parse_struct_names(md)
-                for (i, item) in enumerate(md)
-                    if item isa MDString && string(item) == "air.arg_type_name"
-                        return (md[i+1], md[i+3])
-                    end
-                end
-                error("Struct element metadata keyword 'air.arg_type_name' not found in $(md)")
-            end
-
-            for (i,struct_field_info) in enumerate(struct_info)
-
-                type_name, field_name = parse_struct_names(struct_field_info)
-                field_is_struct = arg.typ isa LLVM.StructType
-
-                if field_is_struct
-                    push!(struct_type_info, MDString("air.struct_type_info"; ctx))
-                    push!(struct_type_info, MDNode(struct_field_info; ctx))
-                end
-
-                push!(struct_type_info, Metadata(ConstantInt(Int32(fieldoffset(arg.typ,i)); ctx)))
-
-                # If field is (arg)buffer, set size to 8 and length to 0
-                if string(struct_field_info[2]) in ["air.buffer", "air.indirect_buffer"]
-                    push!(struct_type_info, Metadata(ConstantInt(Int32(8); ctx))) # Field element size
-                    push!(struct_type_info, Metadata(ConstantInt(Int32(0); ctx))) # Length of field
-                else
-                    field_type = fieldtype(arg.typ, i)
-                    push!(struct_type_info, Metadata(ConstantInt(Int32(sizeof(eltype(field_type))); ctx))) # Field element size
-                    push!(struct_type_info, Metadata(ConstantInt(Int32(length(field_type.parameters)); ctx))) # Length of field
-                end
-                push!(struct_type_info, type_name) # Field type
-                push!(struct_type_info, field_name) # Field name
-                push!(struct_type_info, MDString("air.indirect_argument"; ctx))
-
-                if field_is_struct
-                    push!(struct_type_info, Metadata(ConstantInt(Int32(i); ctx)))
-                else
-                    struct_field_info = MDNode(struct_field_info; ctx)
-                    push!(struct_type_info, struct_field_info)
-                end
-            end
-
-            struct_type_info = MDNode(struct_type_info; ctx)
-
-            # Add argument buffer details
-            # Create the argument buffer main metadata
-            push!(argbuf_info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx))) # Argument index
-            push!(argbuf_info, MDString("air.indirect_buffer"; ctx))
-            push!(argbuf_info, MDString("air.buffer_size"; ctx))
-            push!(argbuf_info, Metadata(ConstantInt(Int32(sizeof(arg.typ)); ctx)))
-            push!(argbuf_info, MDString("air.location_index"; ctx))
-            push!(argbuf_info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
-            push!(argbuf_info, Metadata(ConstantInt(Int32(1); ctx)))
-            # TODO: Check for const array and put to air.read
-            push!(argbuf_info, MDString("air.read_write"; ctx))
-            push!(argbuf_info, MDString("air.struct_type_info"; ctx))
-            push!(argbuf_info, struct_type_info) # Argument buffer type info
-            push!(argbuf_info, MDString("air.arg_type_size"; ctx))
-            push!(argbuf_info, Metadata(ConstantInt(Int32(sizeof(arg.typ)); ctx))) # Arg type size
-            push!(argbuf_info, MDString("air.arg_type_align_size"; ctx))
-            push!(argbuf_info, Metadata(ConstantInt(Int32(Base.datatype_alignment(arg.typ)); ctx)))
-            push!(argbuf_info, MDString("air.arg_type_name"; ctx))
-            push!(argbuf_info, MDString(string(arg.typ); ctx))
-            push!(argbuf_info, MDString("air.arg_name"; ctx))
-            push!(argbuf_info, MDString("arg_$(arg.codegen.i-1)"; ctx)) # TODO: How to get this? Does the compiler job have it somewhere?
-            # Ignore unused flag for now
-
-            # Make argument buffer metadata node
-            argbuf_info = MDNode(argbuf_info; ctx)
-            return argbuf_info
-
-        # Process other references (e.g. to scalars) or plain pointers as simple buffers
-        else
-            ptr_datatype = if arg.typ <: Core.LLVMPtr || arg.typ <: Ptr
-                arg.typ.parameters[1]
-            else
-                arg.typ
-            end
-
-            arg_info_ptr = Metadata[]
-            push!(arg_info_ptr, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx))) # Argument index
-            push!(arg_info_ptr, MDString("air.buffer"; ctx))
-            push!(arg_info_ptr, MDString("air.location_index"; ctx))
-            push!(arg_info_ptr, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
-            push!(arg_info_ptr, Metadata(ConstantInt(Int32(1); ctx)))
-            push!(arg_info_ptr, MDString("air.read_write"; ctx)) # TODO: Check for const array
-            push!(arg_info_ptr, MDString("air.arg_type_size"; ctx))
-            push!(arg_info_ptr, Metadata(ConstantInt(Int32(sizeof(ptr_datatype)); ctx))) # TODO: Get properly
-            push!(arg_info_ptr, MDString("air.arg_type_align_size"; ctx))
-            push!(arg_info_ptr, Metadata(ConstantInt(Int32(Base.datatype_alignment(ptr_datatype)); ctx)))
-            push!(arg_info_ptr, MDString("air.arg_type_name"; ctx))
-            # Handle naming for pointer to ArrayType
-            if eltype(arg.codegen.typ) isa LLVM.ArrayType
-                arg_type_name = jl_type_to_c[eltype(eltype(arg.typ))] * string(length(eltype(arg.codegen.typ)))
-            else
-                arg_type_name = string(eltype(arg.codegen.typ))
-            end
-            push!(arg_info_ptr, MDString(arg_type_name; ctx)) # TODO: Get properly
-            push!(arg_info_ptr, MDString("air.arg_name"; ctx))
-            # TODO: Properly get top-level argument names
-            arg_name = field_info != nothing ? string(field_info[2]) : "arg_$(arg.codegen.i)"
-            push!(arg_info_ptr, MDString(arg_name; ctx))
-            return arg_info_ptr
-        end
-
-    elseif arg.codegen.typ isa LLVM.StructType
-        arg_info_struct = []
-        for (i, elem) in enumerate(collect(elements(arg.codegen.typ)))
-            field_info = structinfo(arg.typ, i)
-            push!(arg_info_struct, add_md((typ=field_info[3], codegen=(typ=elem, i=i)); ctx, field_info, level=level+1))
-        end
-        return arg_info_struct
-
-    # Process as basic leaf argument
-    else
-        arg_info = Metadata[]
-
-        # If it's a top-level arg, encode as a buffer
-        if level == 1
-
-            ## Simple Buffer Argument Metadata layout
-                # Kernel argument index
-                # air.buffer keyword
-                # air.location_index keyword
-                # Kernel argument location index (NOT the same as argument index)
-                    # Values are determined as explained by pages 46 and 79 of the Metal docs
-                        # https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf
-                    # Note that these indices are unique to each resource group type [buffer, threadgroup, sampler, texture]
-                # Unknown value - Has always been 1
-                    # Vertex/stag_in info? Something with rasters?
-                # Resource usage status
-                # air.arg_type_size keyword
-                # Buffer element size
-                # air.arg_type_align_size keyword
-                # Buffer element alignment
-                # air.arg_type_name keyword
-                # Buffer element type name
-                # air.arg_name keyword
-                # Kernel argument name
-
-            datatype = arg.typ
-
-            arg_info_ptr = Metadata[]
-            push!(arg_info_ptr, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
-            push!(arg_info_ptr, MDString("air.buffer"; ctx))
-            push!(arg_info_ptr, MDString("air.location_index"; ctx))
-            push!(arg_info_ptr, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
-            push!(arg_info_ptr, Metadata(ConstantInt(Int32(1); ctx)))
-            push!(arg_info_ptr, MDString("air.read_write"; ctx)) # TODO: Check for const array
-            push!(arg_info_ptr, MDString("air.arg_type_size"; ctx))
-            push!(arg_info_ptr, Metadata(ConstantInt(Int32(sizeof(datatype)); ctx)))
-            push!(arg_info_ptr, MDString("air.arg_type_align_size"; ctx))
-            push!(arg_info_ptr, Metadata(ConstantInt(Int32(Base.datatype_alignment(datatype)); ctx)))
-            push!(arg_info_ptr, MDString("air.arg_type_name"; ctx))
-            push!(arg_info_ptr, MDString(string(eltype(arg.codegen.typ)); ctx))
-            push!(arg_info_ptr, MDString("air.arg_name"; ctx))
-            # TODO: Properly get top-level argument names
-            arg_name = field_info != nothing ? string(field_info[2]) : "arg_$(arg.codegen.i)"
-            push!(arg_info_ptr, MDString(arg_name; ctx))
-
-        # Else process as indirect_constant (vector type)
-        # TODO: Need to check upstream that we're only passing valid vector types
-        elseif arg.codegen.typ isa LLVM.ArrayType
-            arg_length = length(arg.codegen.typ)
-
-            push!(arg_info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
-            push!(arg_info, MDString("air.indirect_constant"; ctx))
-            push!(arg_info, MDString("air.location_index"; ctx))
-            push!(arg_info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
-            push!(arg_info, Metadata(ConstantInt(Int32(1); ctx)))
-            push!(arg_info, MDString("air.arg_type_name"; ctx))
-            arg_type_name = jl_type_to_c[eltype(arg.typ)] * string(arg_length)
-            push!(arg_info, MDString(arg_type_name; ctx))
-            push!(arg_info, MDString("air.arg_name"; ctx))
-            arg_name = field_info != nothing ? string(field_info[2]) : "arg_$(arg.codegen.i)"
-            push!(arg_info, MDString(arg_name; ctx))
-        else
-            error("Unknown Metal kernel argument type $(arg.typ)")
-        end
-
-        return arg_info
+# return the Julia element type of a type represented by an LLVM ArrayType
+# (i.e., not only tuples, but every homogeneous structure)
+function generalized_eltype(typ)
+    if typ <: Tuple
+        eltype(typ)
+    else # homogeneous struct
+        typs = unique(fieldtypes(typ))
+        @assert length(typs) == 1 "LLVM array type used with non-homogeneous struct $typ"
+        typs[]
     end
 end
 
@@ -720,16 +541,21 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     arg_infos = Metadata[]
 
     # Iterate through arguments and create metadata for them
-    for arg in classify_arguments(job, eltype(llvmtype(entry)))
-        # Ignore ghost type
-        if arg.cc != GHOST
-            arg_info = add_md(arg; ctx)
-            # Ensure returned type is a metadata node
-            if !isa(arg_info, MDTuple)
-                arg_info = MDNode(arg_info; ctx)
-            end
-            push!(arg_infos, arg_info)
-        end
+    args = classify_arguments(job, eltype(llvmtype(entry)))
+    for (i, arg) in enumerate(args)
+        haskey(arg, :codegen) || continue
+        @assert arg.codegen.typ isa LLVM.PointerType
+
+        # if an argument is a structure containing resources (buffers, textures, samplers,
+        # constants), as opposed to passing a resource directly, it will be encoded using a
+        # argument encoder targeting an argument buffer. this requires the fields of the
+        # structure to have a (monotonically increasing) resource identifier. see also:
+        # https://developer.apple.com/documentation/metal/buffers/indexing_argument_buffers
+
+        # XXX: do we want to use `i` here so that it's easier to target from Julia?
+        metadata, _ = argument_info(arg, arg.codegen.i-1; ctx)
+        arg_info = MDNode(metadata; ctx)
+        push!(arg_infos, arg_info)
     end
 
     # Create metadata for argument intrinsics last
@@ -737,10 +563,14 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         arg_info = Metadata[]
         push!(arg_info, Metadata(ConstantInt(Int32(length(parameters(entry))-i); ctx)))
         push!(arg_info, MDString("air." * kernel_intrinsics[intr_fn].air_name; ctx))
+
         push!(arg_info, MDString("air.arg_type_name"; ctx))
         push!(arg_info, MDString(kernel_intrinsics[intr_fn].air_typ; ctx))
+
+        # NOTE: this is optional
         push!(arg_info, MDString("air.arg_name"; ctx))
         push!(arg_info, MDString(kernel_intrinsics[intr_fn].air_name; ctx))
+
         arg_info = MDNode(arg_info; ctx)
         push!(arg_infos, arg_info)
     end
@@ -754,6 +584,176 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
 
     return
 end
+
+function argument_info(arg, id; ctx)
+    info = Metadata[]
+
+    # argument index
+    push!(info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
+
+    if arg.codegen.typ isa LLVM.PointerType
+        eltyp = eltype(arg.codegen.typ)
+
+        push!(info, MDString("air.buffer"; ctx))
+
+        push!(info, MDString("air.location_index"; ctx))
+        push!(info, Metadata(ConstantInt(Int32(id); ctx)))
+
+        push!(info, Metadata(ConstantInt(Int32(1); ctx))) # XXX: unknown
+
+        push!(info, MDString("air.read_write"; ctx)) # TODO: Check for const array
+
+        if eltyp isa LLVM.StructType
+            push!(info, MDString("air.struct_type_info"; ctx))
+            nested_info, ids, indirect = struct_info(arg, id, eltyp; ctx)
+            if indirect
+                info[2] = MDString("air.indirect_buffer"; ctx)
+            end
+            push!(info, MDNode(nested_info; ctx))
+        elseif eltyp isa LLVM.ArrayType
+            ids = length(eltyp)
+        else
+            ids = 1
+        end
+
+        # buffers require to report the alignment of the element type
+        # TODO: deduplicate with the same logic below
+        # TODO: what to do with array types?
+        arg_type = if arg.typ <: Core.LLVMPtr
+            arg.typ.parameters[1]
+        else
+            arg.typ
+        end
+
+        push!(info, MDString("air.arg_type_size"; ctx))
+        push!(info, Metadata(ConstantInt(Int32(sizeof(arg_type)); ctx)))
+
+        push!(info, MDString("air.arg_type_align_size"; ctx))
+        push!(info, Metadata(ConstantInt(Int32(Base.datatype_alignment(arg_type)); ctx)))
+    else
+        # this can only happen with indirect argument, i.e., as part of a struct
+
+        ids = 1
+
+        push!(info, MDString("air.indirect_constant"; ctx))
+
+        push!(info, MDString("air.location_index"; ctx))
+        push!(info, Metadata(ConstantInt(Int32(id); ctx)))
+        push!(info, Metadata(ConstantInt(Int32(1); ctx))) # XXX: unknown
+    end
+
+    push!(info, MDString("air.arg_type_name"; ctx))
+    if arg.typ <: Core.LLVMPtr
+        # in the case of buffers, the element type is encoded
+        push!(info, MDString(humanize_typename(arg.typ.parameters[1]); ctx))
+    else
+        push!(info, MDString(humanize_typename(arg.typ); ctx))
+    end
+    # TODO: duplication with struct_info
+
+    # NOTE: this is optional
+    push!(info, MDString("air.arg_name"; ctx))
+    push!(info, MDString(string(arg.name); ctx))
+
+    return info, ids
+end
+
+function struct_info(arg, offset, typ=arg.codegen.typ; indirect=false, ctx)
+    info = Metadata[]
+
+    # the `indirect` keyword argument controls whether we should emit `!indirect_argument`
+    # metadata for all fields of this structure. this flag is set when encountering a
+    # (nested) buffer, in which case earlier fields also need an `!indirect_argument` entry.
+    # we implement this by restarting the process and calling `struct_info` again.
+
+    # the `typ` argument allows overriding the type of this structure. this is needed to
+    # overcome the difference between struct arguments (passed as reference, i.e., pointer)
+    # and nested structs which are a value contained in another object.
+
+    fields = classify_fields(arg.typ, typ)
+    ids = 0
+    id = offset
+    for (i, field) in enumerate(fields)
+        # skip ghost fields
+        haskey(field, :codegen) || continue
+
+        if field.codegen.typ isa LLVM.StructType
+            push!(info, MDString("air.struct_type_info"; ctx))
+            nested_info, field_ids, nested_indirect = struct_info(field, offset; ctx, indirect)
+            if nested_indirect && !indirect
+                return struct_info(arg, offset, typ; ctx, indirect=true)
+            end
+            push!(info, MDNode(nested_info; ctx))
+        elseif field.codegen.typ isa LLVM.ArrayType
+            field_ids = length(field.codegen.typ)
+            element_typ = eltype(field.codegen.typ)
+            while element_typ  isa LLVM.ArrayType
+                field_ids *= length(element_typ)
+                element_typ = eltype(element_typ)
+            end
+        elseif field.codegen.typ isa LLVM.VectorType
+            error("Vector types are not supported")
+        else
+            field_ids = 1
+        end
+
+        # Offset in bytes from start of struct
+        push!(info, Metadata(ConstantInt(Int32(fieldoffset(arg.typ, i)); ctx)))
+
+        # Size of element in bytes, always 8 for buffers (pointer size)
+        if field.codegen.typ isa LLVM.ArrayType
+            push!(info, Metadata(ConstantInt(Int32(sizeof(generalized_eltype(field.typ))); ctx)))
+        else
+            push!(info, Metadata(ConstantInt(Int32(sizeof(field.typ)); ctx)))
+        end
+
+        # Length of element, always 0 for buffers
+        if field.codegen.typ isa LLVM.ArrayType
+            push!(info, Metadata(ConstantInt(Int32(length(field.codegen.typ)); ctx)))
+        else
+            push!(info, Metadata(ConstantInt(Int32(0); ctx)))
+        end
+
+        # Field type
+        if field.typ <: Core.LLVMPtr
+            # in the case of buffers, the element type is encoded
+            push!(info, MDString(humanize_typename(field.typ.parameters[1]); ctx))
+        else
+            push!(info, MDString(humanize_typename(field.typ); ctx))
+        end
+        # TODO: in the case of LLVM.ArrayType (coming from a tuple, or homogeneous struct)
+        #       the element type should be reported as well
+
+        # Field name
+        push!(info, MDString(string(field.name); ctx))
+
+        if field.codegen.typ isa LLVM.PointerType && !indirect
+            # NOTE: we detect actual LLVM pointers here, meaning we only support buffer
+            #       fields encoded by Core.LLVMPtr, not Base.Ptr (encoded as an integer)
+            # TODO: can we support regular pointers (i.e., passing it as an interger)?
+            #       if so, we wouldn't have to look for Ptr/LLVMPtr anymore, but could just
+            #       use the LLVM type representation. on the other hand, to support textures
+            #       etc, we'll have to look at the Julia type representation anyway.
+            return struct_info(arg, offset, typ; ctx, indirect=true)
+        end
+        if indirect
+            push!(info, MDString("air.indirect_argument"; ctx))
+            if field.codegen.typ isa LLVM.StructType
+                push!(info,  Metadata(ConstantInt(Int32(id); ctx)))
+            else
+                indirect_info, indirect_ids = argument_info(field, id; ctx)
+                @assert indirect_ids == 1
+                push!(info, MDNode(indirect_info; ctx))
+            end
+        end
+
+        id += field_ids
+        ids += field_ids
+    end
+
+    return info, ids, indirect
+end
+
 
 
 # module-level metadata
