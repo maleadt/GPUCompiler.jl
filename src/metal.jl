@@ -538,12 +538,16 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     ctx = context(mod)
 
     ## argument info
-    arg_infos = Metadata[]
+    arg_infos = Metadata[]  # information for Metal
+    arg_metas = []          # metadata for Metal.jl
 
     # Iterate through arguments and create metadata for them
     args = classify_arguments(job, eltype(llvmtype(entry)))
     for (i, arg) in enumerate(args)
-        haskey(arg, :codegen) || continue
+        if !haskey(arg, :codegen)
+            push!(arg_metas, Dict{Symbol,Any}(:name=>arg.name, :kind=>:ghost))
+            continue
+        end
         @assert arg.codegen.typ isa LLVM.PointerType
 
         # if an argument is a structure containing resources (buffers, textures, samplers,
@@ -552,10 +556,10 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         # structure to have a (monotonically increasing) resource identifier. see also:
         # https://developer.apple.com/documentation/metal/buffers/indexing_argument_buffers
 
-        # XXX: do we want to use `i` here so that it's easier to target from Julia?
-        metadata, _ = argument_info(arg, arg.codegen.i-1; ctx)
-        arg_info = MDNode(metadata; ctx)
-        push!(arg_infos, arg_info)
+        arg_info, arg_meta, _ = argument_info(arg; ctx)
+        push!(arg_infos, MDNode(arg_info; ctx))
+
+        push!(arg_metas, arg_meta)
     end
 
     # Create metadata for argument intrinsics last
@@ -582,11 +586,13 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     kernel_md = MDNode([entry, stage_infos, arg_infos]; ctx)
     push!(metadata(mod)["air.kernel"], kernel_md)
 
+    job.meta[:arguments] = arg_metas
     return
 end
 
-function argument_info(arg, id; ctx)
+function argument_info(arg, id=0; ctx)
     info = Metadata[]
+    meta = Dict{Symbol,Any}(:name => arg.name)
 
     # argument index
     push!(info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
@@ -597,7 +603,13 @@ function argument_info(arg, id; ctx)
         push!(info, MDString("air.buffer"; ctx))
 
         push!(info, MDString("air.location_index"; ctx))
-        push!(info, Metadata(ConstantInt(Int32(id); ctx)))
+        if id == 0
+            # for top-level arguments (which start at id=0), this value seems to represent
+            # the index of the argument, whereas for nested arguments it's just the id...
+            push!(info, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
+        else
+            push!(info, Metadata(ConstantInt(Int32(id); ctx)))
+        end
 
         push!(info, Metadata(ConstantInt(Int32(1); ctx))) # XXX: unknown
 
@@ -605,15 +617,21 @@ function argument_info(arg, id; ctx)
 
         if eltyp isa LLVM.StructType
             push!(info, MDString("air.struct_type_info"; ctx))
-            nested_info, ids, indirect = struct_info(arg, id, eltyp; ctx)
+            nested_info, nested_meta, ids, indirect = struct_info(arg, id, eltyp; ctx)
             if indirect
                 info[2] = MDString("air.indirect_buffer"; ctx)
             end
             push!(info, MDNode(nested_info; ctx))
+            meta[:kind] = indirect ? :indirect_struct : :struct
+            meta[:fields] = nested_meta
         elseif eltyp isa LLVM.ArrayType
             ids = length(eltyp)
+            meta[:kind] = :array
+            meta[:id] = id
         else
             ids = 1
+            meta[:kind] = :buffer
+            meta[:id] = id
         end
 
         # buffers require to report the alignment of the element type
@@ -640,6 +658,9 @@ function argument_info(arg, id; ctx)
         push!(info, MDString("air.location_index"; ctx))
         push!(info, Metadata(ConstantInt(Int32(id); ctx)))
         push!(info, Metadata(ConstantInt(Int32(1); ctx))) # XXX: unknown
+
+        meta[:kind] = :constant
+        meta[:id] = id
     end
 
     push!(info, MDString("air.arg_type_name"; ctx))
@@ -655,11 +676,13 @@ function argument_info(arg, id; ctx)
     push!(info, MDString("air.arg_name"; ctx))
     push!(info, MDString(string(arg.name); ctx))
 
-    return info, ids
+    meta[:ids] = ids
+    return info, meta, ids
 end
 
 function struct_info(arg, offset, typ=arg.codegen.typ; indirect=false, ctx)
     info = Metadata[]
+    meta = []
 
     # the `indirect` keyword argument controls whether we should emit `!indirect_argument`
     # metadata for all fields of this structure. this flag is set when encountering a
@@ -674,27 +697,40 @@ function struct_info(arg, offset, typ=arg.codegen.typ; indirect=false, ctx)
     ids = 0
     id = offset
     for (i, field) in enumerate(fields)
+        field_meta = Dict{Symbol,Any}(:name => field.name)
+
         # skip ghost fields
-        haskey(field, :codegen) || continue
+        if !haskey(field, :codegen)
+            field_meta[:kind] = :ghost
+            push!(meta, field_meta)
+            continue
+        end
 
         if field.codegen.typ isa LLVM.StructType
             push!(info, MDString("air.struct_type_info"; ctx))
-            nested_info, field_ids, nested_indirect = struct_info(field, offset; ctx, indirect)
+            nested_info, nested_meta, field_ids, nested_indirect =
+                struct_info(field, id; ctx, indirect)
             if nested_indirect && !indirect
                 return struct_info(arg, offset, typ; ctx, indirect=true)
             end
             push!(info, MDNode(nested_info; ctx))
+            field_meta[:kind] = indirect ? :indirect_struct : :struct
+            field_meta[:fields] = nested_meta
         elseif field.codegen.typ isa LLVM.ArrayType
             field_ids = length(field.codegen.typ)
             element_typ = eltype(field.codegen.typ)
-            while element_typ  isa LLVM.ArrayType
+            while element_typ isa LLVM.ArrayType
                 field_ids *= length(element_typ)
                 element_typ = eltype(element_typ)
             end
+            field_meta[:kind] = :array
+            field_meta[:id] = id
         elseif field.codegen.typ isa LLVM.VectorType
             error("Vector types are not supported")
         else
             field_ids = 1
+            field_meta[:kind] = :other
+            field_meta[:id] = id
         end
 
         # Offset in bytes from start of struct
@@ -738,20 +774,26 @@ function struct_info(arg, offset, typ=arg.codegen.typ; indirect=false, ctx)
         end
         if indirect
             push!(info, MDString("air.indirect_argument"; ctx))
+            # numbering of the fields of an indirect arguments begins at id 0 again
+            # TODO: does that mean we should reuse code at a higher level?
             if field.codegen.typ isa LLVM.StructType
-                push!(info,  Metadata(ConstantInt(Int32(id); ctx)))
+                push!(info, Metadata(ConstantInt(Int32(id-offset); ctx)))
+                field_meta[:indirect_id] = id
             else
-                indirect_info, indirect_ids = argument_info(field, id; ctx)
+                indirect_info, indirect_meta, indirect_ids = argument_info(field, id-offset; ctx)
                 @assert indirect_ids == 1
+                field_meta[:kind] = indirect_meta[:kind]
                 push!(info, MDNode(indirect_info; ctx))
             end
         end
 
         id += field_ids
         ids += field_ids
+        field_meta[:ids] = field_ids
+        push!(meta, field_meta)
     end
 
-    return info, ids, indirect
+    return info, meta, ids, indirect
 end
 
 
