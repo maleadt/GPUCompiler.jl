@@ -320,7 +320,7 @@ function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.Fu
     source_sig = typed_signature(job)
 
     source_types = [source_sig.parameters...]
-    source_method = only(methods(job.source.f, job.source.tt))
+    source_method = only(method_matches(typed_signature(job); job.source.world)).method
     source_arguments = method_argnames(source_method)
 
     codegen_types = parameters(codegen_ft)

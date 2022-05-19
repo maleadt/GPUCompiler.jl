@@ -151,7 +151,7 @@ end
 function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ctx = context(mod)
     ft = eltype(llvmtype(f))
-    @compiler_assert return_type(ft) == LLVM.VoidType(ctx) job
+    @compiler_assert LLVM.return_type(ft) == LLVM.VoidType(ctx) job
 
     function remapType(src)
         # TODO: recurse in structs
@@ -166,7 +166,7 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
 
     # generate the new function type & definition
     new_types = LLVMType[remapType(typ) for typ in parameters(ft)]
-    new_ft = LLVM.FunctionType(return_type(ft), new_types)
+    new_ft = LLVM.FunctionType(LLVM.return_type(ft), new_types)
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
     for (arg, new_arg) in zip(parameters(f), parameters(new_f))
@@ -221,7 +221,7 @@ end
 function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ctx = context(mod)
     ft = eltype(llvmtype(f))
-    @compiler_assert return_type(ft) == LLVM.VoidType(ctx) job
+    @compiler_assert LLVM.return_type(ft) == LLVM.VoidType(ctx) job
 
     # generate the new function type & definition
     args = classify_arguments(job, ft)
@@ -237,7 +237,7 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
             bits_as_reference[arg.codegen.i] = false
         end
     end
-    new_ft = LLVM.FunctionType(return_type(ft), new_types)
+    new_ft = LLVM.FunctionType(LLVM.return_type(ft), new_types)
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
     for (i, (arg, new_arg)) in enumerate(zip(parameters(f), parameters(new_f)))
@@ -391,7 +391,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             llvm_typ = convert(LLVMType, kernel_intrinsics[intr_fn].julia_typ; ctx)
             push!(new_param_types, llvm_typ)
         end
-        new_ft = LLVM.FunctionType(return_type(ft), new_param_types)
+        new_ft = LLVM.FunctionType(LLVM.return_type(ft), new_param_types)
         new_f = LLVM.Function(mod, fn, new_ft)
         linkage!(new_f, linkage(f))
         for (arg, new_arg) in zip(parameters(f), parameters(new_f))
