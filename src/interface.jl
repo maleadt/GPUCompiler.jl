@@ -139,14 +139,20 @@ struct CompilerJob{T,P,F}
     params::P
     entry_abi::Symbol
 
-    function CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams, entry_abi::Symbol)
+    # metadata gathered during compilation
+    meta::Dict{Symbol,Any}
+
+    function CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec,
+                         params::AbstractCompilerParams, entry_abi::Symbol)
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
-        new{typeof(target), typeof(params), typeof(source)}(target, source, params, entry_abi)
+        new{typeof(target), typeof(params), typeof(source)}(
+            target, source, params, entry_abi, Dict{Symbol,Any}())
     end
 end
-CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams; entry_abi=:specfunc) =
+CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec,
+            params::AbstractCompilerParams; entry_abi=:specfunc) =
     CompilerJob(target, source, params, entry_abi)
 
 Base.similar(@nospecialize(job::CompilerJob), @nospecialize(source::FunctionSpec)) =
